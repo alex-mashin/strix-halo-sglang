@@ -14,7 +14,8 @@ FROM ${BASE_IMAGE}
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SGLANG_FORCE_NATIVE_LAYERNORM=1
 ENV HF_HOME=/root/.cache/huggingface
-ENV PYTORCH_ROCM_ARCH=gfx1151
+ARG AMDGPU_TARGET=gfx1151
+ENV PYTORCH_ROCM_ARCH=${AMDGPU_TARGET}
 
 # Perf flags — measured ~38% throughput uplift on gfx1151 vs disabled defaults.
 # TunableOp autotunes GEMM kernels per-shape; results cached at $PYTORCH_TUNABLEOP_FILENAME.
@@ -40,9 +41,12 @@ RUN git init sglang \
 WORKDIR /sgl-workspace/sglang
 
 # Patch 1 — allow gfx1151 in sgl-kernel's arch guard (see patches/01-allow-gfx1151.md).
+ARG ADD_GFX_LIST='"gfx1151"' \
+    REPLACE_GFX_OR_LIST="'gfx942', 'gfx950', or 'gfx1151'"
+
 RUN sed -i \
-    -e 's|\["gfx942", "gfx950"\]|["gfx942", "gfx950", "gfx1151"]|' \
-    -e "s|'gfx942' or 'gfx950'|'gfx942', 'gfx950', or 'gfx1151'|" \
+    -e "s|\[\"gfx942\", \"gfx950\"\]|[\"gfx942\", \"gfx950\", $ADD_GFX_LIST]|" \
+    -e "s|'gfx942' or 'gfx950'|$REPLACE_GFX_OR_LIST|" \
     sgl-kernel/setup_rocm.py
 
 # Patch 1b — fix host/device WARP_SIZE mismatch in topk softmax/sigmoid sgl-kernels.
@@ -52,6 +56,7 @@ RUN sed -i \
 # with 256, raising hipErrorLaunchFailure and a downstream GPU page fault on the
 # first MoE forward. The sibling moe_fused_gate.cu already hardcodes WARP_SIZE=32;
 # replicate the same fix in the topk kernels. See patches/04-warp-size-wave32.md.
+ARG ADDED_GFX='gfx1151'
 RUN for f in sgl-kernel/csrc/moe/moe_topk_softmax_kernels.cu sgl-kernel/csrc/moe/moe_topk_sigmoid_kernels.cu; do \
       python3 -c "import sys, re; p=sys.argv[1]; t=open(p).read(); marker='// added: gfx1151 wave32 kStrixWarp'; \
         assert marker not in t, f'already patched: {p}'; \
@@ -183,7 +188,8 @@ PYEOF
 
 # Compile sgl-kernel for gfx1151
 WORKDIR /sgl-workspace/sglang/sgl-kernel
-RUN AMDGPU_TARGET=gfx1151 python3 setup_rocm.py develop
+ARG AMDGPU_TARGET=gfx1151
+RUN AMDGPU_TARGET=$AMDGPU_TARGET python3 setup_rocm.py develop
 
 # Install SGLang via pyproject_other.toml (ROCm-safe deps, no NVIDIA wheels).
 #
