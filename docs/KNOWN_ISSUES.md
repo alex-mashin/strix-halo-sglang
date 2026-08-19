@@ -44,6 +44,28 @@ Mitigation: default to `SGLANG_FORCE_NATIVE_LAYERNORM=1` (already in Dockerfile)
 
 Fix (upstream): replace inline asm with portable HIP intrinsics, or add an RDNA branch.
 
+## aiter as a whole is unusable on RDNA 3.5 (surveyed 2026-08-16)
+
+The two failures above are not isolated gaps. aiter exposes 424 top-level symbols; probing
+one kernel from each major family on gfx1151, **every one fails to build**:
+
+| Family | Probe | Failure |
+|---|---|---|
+| Attention | `flash_attn_func` | CK tile templates assume wave64 thread tiles |
+| Normalization | `rms_norm` | `v_pk_mul_f32` — CDNA-only instruction |
+| Activation | `silu_and_mul` | `activation_kernels.cu:150: error: instruction not supported on this GPU` |
+| MoE | `topk_softmax` | `module_moe_asm` build fails — the module is hand-written CDNA assembly |
+
+So `--moe-runner-backend aiter`, `SGLANG_USE_AITER=1`, and `--attention-backend aiter` are
+all dead ends on this hardware, and there is no "some aiter kernels still help" middle
+ground to exploit. Supporting RDNA 3.5 in aiter is a port — wave32-aware CK
+specializations plus replacing CDNA inline asm and `.s` assembly across four kernel
+families — not a patch. Probe script: [`bench/aiter_probe.py`](../bench/aiter_probe.py).
+
+Practical consequence: the Triton fallbacks SGLang uses instead are correct and, per
+[`bench/results.md`](../bench/results.md), already run at 70–82% of peak memory bandwidth.
+aiter is not the lever for closing the remaining single-stream gap.
+
 ## Wave attention backend incompatible with Qwen3.5
 
 **Symptom:** `--attention-backend wave` errors out with:
@@ -64,4 +86,4 @@ Mitigation: use `--attention-backend triton`.
 
 **Where SGLang still wins:** continuous batching — at 8 concurrent streams SGLang's aggregate throughput is many times Ollama's serialized rate (see [`bench/results.md`](../bench/results.md)). For multi-user / multi-agent workloads SGLang wins decisively; for solo single-stream use Ollama is faster today.
 
-Fix (upstream, in order of impact): aiter RDNA RMSNorm path, aiter wave32 CK templates for MHA.
+Fix (upstream, in measured order of impact): aiter wave32 CK templates for MHA, then the int4 MoE GEMM, then an RDNA RMSNorm path. That ordering is empirical, not intuitive — a fused RMSNorm is worth only ~2% at decode (it is worth 8× at prefill shapes), CUDA graphs are worth nothing, and shrinking the MoE `BLOCK_SIZE_M` to fit decode makes things slightly *worse*. See the "three hypotheses, all negative" table in [`bench/results.md`](../bench/results.md) before spending time here.
